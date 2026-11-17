@@ -32,7 +32,9 @@
 //     flattens any position and blocks entries until a signal fires out of an extra-deep
 //     washout (return at most -STRONG_WASH).
 //   - Exits, whichever fires first: a take-profit into strength (the return over WASH_BARS
-//     bars at least TP_RET while the trade is at least TP_PROFIT in profit: the recovery
+//     bars at least TP_RET while the trade is at least TP_PROFIT in profit — or
+//     TP_PROFIT_DEEP when the entry's washout was deeper than DEEP_WASH, since deeper
+//     capitulations recover further: the recovery
 //     has run, bank it before the tape takes it back); a hard stop HARD_STOP under the
 //     average entry price; a trailing stop TRAIL_PCT under the peak close once the trade
 //     has been TRAIL_ACTIVATE in profit; a second-leg guard (return over FADE_BARS bars
@@ -63,12 +65,12 @@ const TROUGH_BARS = 30;
 const TROUGH_AGE = 6;
 const TROUGH_BOUNCE = 0.0015;
 /** While a take-profit would fire but the last TURN_BARS return is still at least PARA_RET
- * (the burst is still vertical), defer to a tight trailing stop instead of banking early. */
-const PARA_RET = 0.007;
-const PARA_TRAIL = 0.003;
+ * (the burst is still vertical), defer to a trailing stop instead of banking early. */
+const PARA_RET = 0.005;
+const PARA_TRAIL = 0.006;
 const STRONG_WASH = 0.008;
-const SIZE_BPS = 9_800n;
-const HALF_SIZE_BPS = 4_900n;
+const SIZE_BPS = 10_000n;
+const HALF_SIZE_BPS = 5_000n;
 const HARD_STOP = 0.010;
 const TRAIL_ACTIVATE = 0.005;
 const TRAIL_PCT = 0.0075;
@@ -76,6 +78,12 @@ const FADE_BARS = 30;
 const FADE_RET = -0.99;
 const TP_PROFIT = 0.007;
 const TP_RET = 0.006;
+/** Depth-scaled take-profit: when the washout that produced the entry was deep (the
+ * WASH_BARS return on the entry decision bar at or beyond -DEEP_WASH), the expected
+ * recovery is larger, so the take-profit demands TP_PROFIT_DEEP before banking.
+ * Shallower washouts keep the standard TP_PROFIT. */
+const DEEP_WASH = 0.0135;
+const TP_PROFIT_DEEP = 0.0175;
 const TIME_BARS = 300;
 const TIME_PROFIT = 0.003;
 const COOLDOWN = 30;
@@ -132,6 +140,11 @@ let peakClose = 0;
 let equityAtEntry = 0n;
 let wasHeld = false;
 
+/** The WASH_BARS return on the bar the open trade's buy was decided (its washout
+ *  depth), captured when the order is placed and consumed when the fill appears. */
+let entryWash: number | null = null;
+let pendingEntryWash: number | null = null;
+
 function drawdown(state: BarsState): number {
   if (peakEquity === 0n) return 0;
   return 1 - Number(state.equity) / Number(peakEquity);
@@ -178,11 +191,14 @@ await runBars({
         entrySeq = batch.seq;
         peakClose = close;
         equityAtEntry = state.equity;
+        entryWash = pendingEntryWash;
       }
       if (close > peakClose) peakClose = close;
       const fade = ret(FADE_BARS);
       const stretch = ret(WASH_BARS);
-      const tpOk = stretch !== null && stretch >= TP_RET && close >= entryPrice * (1 + TP_PROFIT);
+      const tpProfit =
+        entryWash !== null && entryWash <= -DEEP_WASH ? TP_PROFIT_DEEP : TP_PROFIT;
+      const tpOk = stretch !== null && stretch >= TP_RET && close >= entryPrice * (1 + tpProfit);
       const turn10 = ret(TURN_BARS);
       const parabolic = tpOk && turn10 !== null && turn10 >= PARA_RET;
       const exit =
@@ -245,6 +261,7 @@ await runBars({
     const base = state.cash < room ? state.cash : room;
     const notional = (base * (dd >= DD_HALF ? HALF_SIZE_BPS : SIZE_BPS)) / BPS;
     if (notional === 0n || notional < BigInt(state.hello.fees.min_notional_quote_units)) return [];
+    pendingEntryWash = wash;
     return [{ side: 'buy', symbol, notional_quote_units: notional, max_slippage_bps: MAX_SLIPPAGE_BPS }];
   },
 });
