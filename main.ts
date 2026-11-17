@@ -54,17 +54,29 @@ const TURN_BARS = 10;
 const TURN_RET = 0.0012;
 const EMA_LONG = 200;
 const EMA_BAND = 0.002;
+/** Trough tier: an episode whose deepest washout reached -CAPIT_PCT may be bought at the
+ * trough itself, without the EMA guard, once the fall has demonstrably stopped: the low
+ * of the last TROUGH_BARS closes is at least TROUGH_AGE bars old, the close has bounced
+ * TROUGH_BOUNCE off it, and the last TURN_BARS return is no longer falling. */
+const CAPIT_PCT = 0.011;
+const TROUGH_BARS = 30;
+const TROUGH_AGE = 6;
+const TROUGH_BOUNCE = 0.0015;
+/** While a take-profit would fire but the last TURN_BARS return is still at least PARA_RET
+ * (the burst is still vertical), defer to a tight trailing stop instead of banking early. */
+const PARA_RET = 0.007;
+const PARA_TRAIL = 0.003;
 const STRONG_WASH = 0.008;
 const SIZE_BPS = 9_800n;
 const HALF_SIZE_BPS = 4_900n;
 const HARD_STOP = 0.010;
-const TRAIL_ACTIVATE = 0.0035;
-const TRAIL_PCT = 0.0055;
+const TRAIL_ACTIVATE = 0.005;
+const TRAIL_PCT = 0.0075;
 const FADE_BARS = 30;
-const FADE_RET = -0.006;
-const TP_PROFIT = 0.008;
+const FADE_RET = -0.99;
+const TP_PROFIT = 0.007;
 const TP_RET = 0.006;
-const TIME_BARS = 180;
+const TIME_BARS = 300;
 const TIME_PROFIT = 0.003;
 const COOLDOWN = 30;
 const LOSS_COOLDOWN = 60;
@@ -110,6 +122,8 @@ let cooldownUntil = -1;
 let armedUntil = -1;
 /** After a losing exit, arming waits for the washout to reset (the return back above -RESET_PCT). */
 let needsReset = false;
+/** The deepest washout return of the currently armed episode (the trough tier's test). */
+let minWash = 0;
 
 /** The open trade's reference points, set on the batch where the position first appears. */
 let entryPrice = 0;
@@ -168,9 +182,13 @@ await runBars({
       if (close > peakClose) peakClose = close;
       const fade = ret(FADE_BARS);
       const stretch = ret(WASH_BARS);
+      const tpOk = stretch !== null && stretch >= TP_RET && close >= entryPrice * (1 + TP_PROFIT);
+      const turn10 = ret(TURN_BARS);
+      const parabolic = tpOk && turn10 !== null && turn10 >= PARA_RET;
       const exit =
         halted ||
-        (stretch !== null && stretch >= TP_RET && close >= entryPrice * (1 + TP_PROFIT)) ||
+        (tpOk && !parabolic) ||
+        (parabolic && close <= peakClose * (1 - PARA_TRAIL)) ||
         close <= entryPrice * (1 - HARD_STOP) ||
         (peakClose >= entryPrice * (1 + TRAIL_ACTIVATE) && close <= peakClose * (1 - TRAIL_PCT)) ||
         (fade !== null && fade <= FADE_RET) ||
@@ -183,14 +201,40 @@ await runBars({
     const wash = ret(WASH_BARS);
     if (wash !== null) {
       if (needsReset && wash > -RESET_PCT) needsReset = false;
-      if (!needsReset && wash <= -WASH_PCT) armedUntil = batch.seq + ARM_BARS;
+      if (!needsReset && wash <= -WASH_PCT) {
+        if (batch.seq > armedUntil) minWash = wash;
+        else if (wash < minWash) minWash = wash;
+        armedUntil = batch.seq + ARM_BARS;
+      }
     }
     if (batch.seq > armedUntil) armedUntil = -1;
 
     if (batch.seq < cooldownUntil || armedUntil < 0) return [];
-    if (emaLong.value !== null && close < emaLong.value * (1 - EMA_BAND)) return [];
+    // Capitulation entry: a fall of at least CAPIT_PCT over WASH_BARS that is printing a
+    // fresh TROUGH_BARS low on this very bar is bought at the low itself, ahead of any
+    // turn confirmation. The hard stop caps the cost when the fall is not finished.
+    let capitEntry = false;
+    if (wash !== null && wash <= -CAPIT_PCT && closes.length > TROUGH_BARS) {
+      let low = Infinity;
+      for (let j = closes.length - TROUGH_BARS; j < closes.length; j++) if (closes[j]! < low) low = closes[j]!;
+      capitEntry = close <= low * (1 + 0.001);
+    }
+    // Trough tier: a capitulation bought at its low, once the fall has stopped. The size
+    // and brake logic below is shared with the standard turn entry.
+    let troughEntry = false;
+    if (minWash <= -CAPIT_PCT && closes.length > TROUGH_BARS) {
+      let lowIdx = closes.length - 1;
+      for (let j = closes.length - TROUGH_BARS; j < closes.length; j++) if (closes[j]! < closes[lowIdx]!) lowIdx = j;
+      const lowAge = closes.length - 1 - lowIdx;
+      const turn = ret(TURN_BARS);
+      troughEntry =
+        lowAge >= TROUGH_AGE &&
+        close >= closes[lowIdx]! * (1 + TROUGH_BOUNCE) &&
+        turn !== null && turn >= -0.001;
+    }
+    if (!capitEntry && !troughEntry && emaLong.value !== null && close < emaLong.value * (1 - EMA_BAND)) return [];
     const turn = ret(TURN_BARS);
-    if (turn === null || turn < TURN_RET || close <= prevClose) return [];
+    if (!capitEntry && !troughEntry && (turn === null || turn < TURN_RET || close <= prevClose)) return [];
     if (halted) {
       if (wash === null || wash > -STRONG_WASH) return [];
       halted = false;
