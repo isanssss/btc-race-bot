@@ -64,10 +64,15 @@ const CAPIT_PCT = 0.011;
 const TROUGH_BARS = 30;
 const TROUGH_AGE = 6;
 const TROUGH_BOUNCE = 0.0015;
-/** While a take-profit would fire but the last TURN_BARS return is still at least PARA_RET
- * (the burst is still vertical), defer to a trailing stop instead of banking early. */
+/** While a take-profit would fire but the last PARA_BARS return is still at least
+ * PARA_RET (the burst is still vertical), defer to a trailing stop instead of banking
+ * early. The deferral lookback is deliberately much shorter than TURN_BARS: a 10-bar
+ * window keeps crediting the burst's early rise for bars after the burst has actually
+ * topped, so the bank lands well into the fade; a 4-bar window detects the stall
+ * almost immediately and banks within a bar or two of the peak. */
 const PARA_RET = 0.005;
 const PARA_TRAIL = 0.006;
+const PARA_BARS = 4;
 const STRONG_WASH = 0.008;
 const SIZE_BPS = 10_000n;
 const HALF_SIZE_BPS = 5_000n;
@@ -199,8 +204,8 @@ await runBars({
       const tpProfit =
         entryWash !== null && entryWash <= -DEEP_WASH ? TP_PROFIT_DEEP : TP_PROFIT;
       const tpOk = stretch !== null && stretch >= TP_RET && close >= entryPrice * (1 + tpProfit);
-      const turn10 = ret(TURN_BARS);
-      const parabolic = tpOk && turn10 !== null && turn10 >= PARA_RET;
+      const turnPara = ret(PARA_BARS);
+      const parabolic = tpOk && turnPara !== null && turnPara >= PARA_RET;
       const exit =
         halted ||
         (tpOk && !parabolic) ||
